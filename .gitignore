@@ -1,3 +1,6 @@
+# Ignore build output
+/build/
+
 # Ignore the export directory
 /export/
 
@@ -31,3 +34,7 @@ Thumbs.db
 
 # Ignore any log files
 *.log
+
+# Ignore temp directories
+/tmp
+/temp
