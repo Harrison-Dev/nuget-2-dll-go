@@ -1,0 +1,33 @@
+# Ignore the export directory
+/export/
+
+# Ignore Go binary
+go-nuget-unity-exporter
+go-nuget-unity-exporter.exe
+
+# Ignore NuGet packages
+*.nupkg
+
+# Ignore common Go files
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Ignore macOS system files
+.DS_Store
+
+# Ignore Windows system files
+Thumbs.db
+
+# Ignore IDE-specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Ignore any log files
+*.log
