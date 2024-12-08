@@ -13,7 +13,6 @@ import (
 
 func main() {
 	http.HandleFunc("/download", downloadHandler)
-
 	port := os.Getenv("PORT")
 	if port == "" {
 		port = "8080"
@@ -35,8 +34,6 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	exportDir := "./export"
-
-	// 呼叫我們的內部邏輯
 	err := internal.ExportNugetPackageToUnity(packageName, packageVersion, exportDir)
 	if err != nil {
 		log.Printf("Error exporting package: %v\n", err)
@@ -44,7 +41,6 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// unitypackage 名稱就是 packageName + ".unitypackage"
 	unityPackageName := packageName + ".unitypackage"
 	unityPackagePath := filepath.Join(".", unityPackageName)
 
@@ -69,16 +65,11 @@ func downloadHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	_, err = ioCopy(w, file)
+	_, err = io.Copy(w, file)
 	if err != nil {
 		log.Printf("Error sending file: %v\n", err)
-		// 回傳前端可能已中斷，不一定要視為錯誤
 	}
 
-	// 可根據需要清理產生的檔案，避免長期累積
 	os.Remove(unityPackagePath)
-}
 
-func ioCopy(dst http.ResponseWriter, src *os.File) (int64, error) {
-	return io.Copy(dst, src)
 }
