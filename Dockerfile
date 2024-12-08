@@ -1,37 +1,51 @@
-# 第一階段：建構階段，基於 .NET SDK 映像
-FROM mcr.microsoft.com/dotnet/sdk:7.0 AS build
+# Stage 1: Build the Go binary
+FROM golang:1.19-alpine AS builder
+
 WORKDIR /app
 
-# 安裝 Go
-ENV GO_VERSION=1.20.4
-RUN wget https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz \
-    && tar -C /usr/local -xzf go${GO_VERSION}.linux-amd64.tar.gz \
-    && rm go${GO_VERSION}.linux-amd64.tar.gz
-ENV PATH=/usr/local/go/bin:$PATH
+# Copy go.mod
+COPY go.mod ./
 
-# 確認 Go 安裝成功
-RUN go version
-
-# 複製 Go 模組文件並下載依賴
-COPY go.mod  ./
-RUN go mod tidy
+# 下載依賴
 RUN go mod download
 
-# 複製整個應用程式代碼
+# 複製其餘的源代碼
 COPY . .
 
-# 構建 Go 應用
-RUN go build -o server ./cmd/server
+# 構建靜態的 Go 服務器二進制文件
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -a -installsuffix cgo -o server ./cmd/server
 
-# 第二階段：運行階段，基於 .NET 運行時映像
-FROM mcr.microsoft.com/dotnet/runtime:7.0 AS runtime
+# Stage 2: Runtime stage 基于 Debian slim
+FROM debian:bullseye-slim AS runtime
+
 WORKDIR /app
 
-# 複製從建構階段編譯好的 Go 二進位檔
-COPY --from=build /app/server /app/server
+# 安装 Mono 和其他必要的包
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        mono-complete \
+        wget \
+        ca-certificates \
+        bash && \
+    rm -rf /var/lib/apt/lists/*
 
-# 暴露應用所需的端口
-EXPOSE 8080
+# 下载最新的 nuget.exe
+RUN wget -O /app/nuget.exe https://dist.nuget.org/win-x86-commandline/latest/nuget.exe
 
-# 設定容器啟動時運行的命令
+# 创建一个包装 nuget.exe 的脚本并将其加入到 PATH 中
+RUN printf '#!/bin/sh\nmono /app/nuget.exe "$@"\n' > /usr/local/bin/nuget && \
+    chmod +x /usr/local/bin/nuget
+
+# 复制从 builder 阶段构建的 Go 二进制文件
+COPY --from=builder /app/server /app/server
+
+# 确保二进制文件具有执行权限
+RUN chmod +x /app/server
+
+# 设置环境变量
+ENV HOME=/root
+ENV NUGET_PACKAGES=/root/.nuget/packages
+ENV PATH="/app:/usr/local/bin:${PATH}"
+
+# 设置默认命令来运行 Go 服务器
 CMD ["./server"]
