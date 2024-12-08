@@ -1,0 +1,45 @@
+name: Build Unitypackage
+
+on:
+  workflow_dispatch:
+    inputs:
+      package_name:
+        description: "The NuGet package name (e.g. Newtonsoft.Json)"
+        required: true
+        default: "Newtonsoft.Json"
+      package_version:
+        description: "The NuGet package version or 'latest'"
+        required: false
+        default: "latest"
+
+jobs:
+  build-and-export:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out code
+        uses: actions/checkout@v3
+
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.20'
+
+      - name: Install nuget CLI
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nuget
+
+      - name: Build and run exporter
+        run: |
+          go mod tidy
+          # 因為原程式是互動式(從標準輸入取得套件名稱與版本)，我們可以透過echo來模擬使用者輸入
+          # 此處使用Actions的input:
+          # 第一次prompt輸入package_name，第二次prompt輸入package_version
+          echo -e "${{ github.event.inputs.package_name }}\n${{ github.event.inputs.package_version }}" | go run cmd/nuget2unitypackage/main.go
+
+      - name: Upload unitypackage artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: unitypackage
+          path: ./*.unitypackage
+          retention-days: 3
