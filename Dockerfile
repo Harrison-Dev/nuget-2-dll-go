@@ -24,9 +24,7 @@ WORKDIR /app
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         mono-complete \
-        wget \
-        ca-certificates \
-        bash && \
+        wget && \
     rm -rf /var/lib/apt/lists/*
 
 # 下载最新的 nuget.exe
