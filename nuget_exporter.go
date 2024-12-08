@@ -1,14 +1,29 @@
 package main
 
 import (
+	"archive/tar"
 	"bufio"
+	"compress/gzip"
 	"fmt"
 	"io"
+	"math/rand"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
+	"time"
 )
+
+// 預設的目標框架優先順序
+var frameworkPriority = []string{
+	"netstandard2.0",
+	"net45",
+	"net46",
+	"net47",
+	"net48",
+	"netstandard2.1",
+}
 
 func getUserInput(prompt string, defaultValue string) string {
 	reader := bufio.NewReader(os.Stdin)
@@ -32,6 +47,11 @@ func copyFile(src, dst string) error {
 	}
 	defer sourceFile.Close()
 
+	err = os.MkdirAll(filepath.Dir(dst), os.ModePerm)
+	if err != nil {
+		return err
+	}
+
 	destFile, err := os.Create(dst)
 	if err != nil {
 		return err
@@ -43,9 +63,7 @@ func copyFile(src, dst string) error {
 }
 
 func createPackageJson(packageName, version, outputPath string) error {
-	// 將 packageName 標準化為 Unity 可接受的格式 (小寫、用 '-' 代替 '.')
 	normalizedName := "com.nuget." + strings.ToLower(strings.ReplaceAll(packageName, ".", "-"))
-
 	packageJsonContent := fmt.Sprintf(`{
   "name": "%s",
   "displayName": "%s",
@@ -60,10 +78,7 @@ func createPackageJson(packageName, version, outputPath string) error {
 }
 
 func createAsmdef(asmName, dllName, outputPath string) error {
-	// 為了避免與 DLL 同名，給 asmdef 加一個後綴
-	// name 欄位中則可用合適的命名。例如：將 asmName 做小寫處理。
 	asmdefName := strings.ToLower(strings.ReplaceAll(asmName, ".", "-")) + "-asmdef"
-
 	asmdefContent := fmt.Sprintf(`{
   "name": "%s",
   "overrideReferences": true,
@@ -78,22 +93,144 @@ func createAsmdef(asmName, dllName, outputPath string) error {
 	return os.WriteFile(asmdefPath, []byte(asmdefContent), 0644)
 }
 
-func selectFromList(prompt string, items []string) int {
-	fmt.Println(prompt)
-	for i, item := range items {
-		fmt.Printf("[%d] %s\n", i, item)
+// 從找到的frameworkDirs中，根據預設的優先順序自動選擇最合適的
+func chooseFrameworkAuto(frameworkDirs []string) string {
+	fwSet := make(map[string]bool)
+	for _, fw := range frameworkDirs {
+		fwSet[fw] = true
 	}
-	fmt.Print("Select an index: ")
-	var choice int
-	_, err := fmt.Scan(&choice)
-	if err != nil || choice < 0 || choice >= len(items) {
-		fmt.Println("Invalid selection.")
-		return -1
+	for _, preferred := range frameworkPriority {
+		if fwSet[preferred] {
+			return preferred
+		}
 	}
-	return choice
+	sort.Strings(frameworkDirs)
+	return frameworkDirs[0]
+}
+
+// 簡易產生一個假GUID (16 hex chars)
+func genGUID() string {
+	const hexChars = "0123456789abcdef"
+	b := make([]byte, 32)
+	for i := 0; i < 32; i++ {
+		b[i] = hexChars[rand.Intn(len(hexChars))]
+	}
+	return string(b)
+}
+
+// 為一個資產產生簡易meta檔案內容
+// 注意：實務上可能需要依資產類型產生更合適的 meta 檔
+func generateMeta(guid string) []byte {
+	return []byte(fmt.Sprintf(`fileFormatVersion: 2
+guid: %s
+timeCreated: %d
+licenseType: Free
+DefaultImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+`, guid, time.Now().Unix()))
+}
+
+// 掃描 export/<packageName> 下所有檔案，將它們全部打包到 .unitypackage
+// 檔案路徑轉換規則：
+// export/<packageName>/Runtime/... => Assets/<packageName>/Runtime/...
+// 同理如有其他子檔案，皆以此類推
+// 每個檔案以 GUID/asset, GUID/asset.meta, GUID/pathname 表示
+func createUnityPackageFromExport(exportDir, packageName string, outPackageName string) error {
+	// 收集所有需要打包的檔案
+	var files []string
+	err := filepath.Walk(exportDir, func(path string, info os.FileInfo, wErr error) error {
+		if wErr != nil {
+			return wErr
+		}
+		if !info.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return err
+	}
+
+	// 開啟 unitypackage 檔案
+	outFile, err := os.Create(outPackageName)
+	if err != nil {
+		return err
+	}
+	defer outFile.Close()
+
+	gzipWriter := gzip.NewWriter(outFile)
+	defer gzipWriter.Close()
+
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	for _, f := range files {
+		rel, err := filepath.Rel(exportDir, f)
+		if err != nil {
+			return err
+		}
+		// 將路徑轉換為 Assets/<packageName>/...
+		unityPath := filepath.Join("Assets", packageName, rel)
+		unityPath = filepath.ToSlash(unityPath)
+
+		content, err := os.ReadFile(f)
+		if err != nil {
+			return err
+		}
+
+		guid := genGUID()
+
+		// 寫入 asset
+		assetHeader := &tar.Header{
+			Name: guid + "/asset",
+			Mode: 0600,
+			Size: int64(len(content)),
+		}
+		if err := tarWriter.WriteHeader(assetHeader); err != nil {
+			return err
+		}
+		if _, err := tarWriter.Write(content); err != nil {
+			return err
+		}
+
+		// 寫入 asset.meta
+		metaContent := generateMeta(guid)
+		metaHeader := &tar.Header{
+			Name: guid + "/asset.meta",
+			Mode: 0600,
+			Size: int64(len(metaContent)),
+		}
+		if err := tarWriter.WriteHeader(metaHeader); err != nil {
+			return err
+		}
+		if _, err := tarWriter.Write(metaContent); err != nil {
+			return err
+		}
+
+		// 寫入 pathname
+		pathnameBytes := []byte(unityPath)
+		pathnameHeader := &tar.Header{
+			Name: guid + "/pathname",
+			Mode: 0600,
+			Size: int64(len(pathnameBytes)),
+		}
+		if err := tarWriter.WriteHeader(pathnameHeader); err != nil {
+			return err
+		}
+		if _, err := tarWriter.Write(pathnameBytes); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 func main() {
+	rand.Seed(time.Now().UnixNano())
+
 	fmt.Println("Welcome to the Interactive NuGet to Unity Package Exporter!")
 	nugetPackageName := getUserInput("Enter the NuGet package name (e.g. Newtonsoft.Json)", "")
 	packageVersion := getUserInput("Enter the package version (or leave empty for latest)", "")
@@ -104,7 +241,7 @@ func main() {
 		fmt.Printf("Failed to create temporary directory: %v\n", err)
 		return
 	}
-	defer os.RemoveAll(tempDir) // 結束時清理
+	defer os.RemoveAll(tempDir)
 
 	exportPath := "./export"
 	pluginPath := filepath.Join(exportPath, nugetPackageName)
@@ -127,7 +264,7 @@ func main() {
 
 	// 找出安裝後的套件目錄
 	var packageInstallDir string
-	err = filepath.Walk(tempDir, func(path string, info os.FileInfo, wErr error) error {
+	filepath.Walk(tempDir, func(path string, info os.FileInfo, wErr error) error {
 		if wErr != nil {
 			return wErr
 		}
@@ -137,24 +274,24 @@ func main() {
 		}
 		return nil
 	})
+
 	if packageInstallDir == "" {
 		fmt.Printf("Could not find installed package directory for %s\n", nugetPackageName)
 		return
 	}
 
-	// 如果使用者沒指定版本，嘗試從目錄名推斷版本
+	// 若未指定版本，從目錄名推斷版本
 	if packageVersion == "" || packageVersion == "latest" {
 		baseName := filepath.Base(packageInstallDir)
 		prefix := nugetPackageName + "."
 		if strings.HasPrefix(baseName, prefix) {
 			packageVersion = strings.TrimPrefix(baseName, prefix)
 		} else {
-			// fallback預設
 			packageVersion = "1.0.0"
 		}
 	}
 
-	// 找出可用的 target frameworks
+	// 找可用的 framework
 	libPath := filepath.Join(packageInstallDir, "lib")
 	frameworkDirs := []string{}
 	filepath.Walk(libPath, func(path string, info os.FileInfo, wErr error) error {
@@ -174,11 +311,8 @@ func main() {
 		return
 	}
 
-	choice := selectFromList("Select a target framework to use:", frameworkDirs)
-	if choice < 0 {
-		return
-	}
-	selectedFramework := frameworkDirs[choice]
+	// 自動選擇最適合 Unity 的framework
+	selectedFramework := chooseFrameworkAuto(frameworkDirs)
 
 	// 建立輸出目錄
 	err = os.MkdirAll(filepath.Join(pluginPath, "Runtime"), os.ModePerm)
@@ -198,10 +332,8 @@ func main() {
 	}
 
 	totalCopied := 0
-	var asmName string
-	var dllName string
+	var asmName, dllName string
 	if len(dllFiles) > 0 {
-		// 假設取第一個 DLL 的檔名作為 asmdef 名稱的基底
 		dllName = filepath.Base(dllFiles[0])
 		asmName = strings.TrimSuffix(dllName, filepath.Ext(dllName))
 	}
@@ -236,6 +368,14 @@ func main() {
 	}
 
 	fmt.Printf("\n========== Script finished, copied [%d] DLL(s) from '%s' to %s! ==========\n", totalCopied, selectedFramework, pluginPath)
-	fmt.Println("You can now use this folder as a Unity package by placing it under your project's 'Packages' directory, or reference it via a local package path.")
-	fmt.Println("If you have a test assembly, ensure that its asmdef references the newly created asmdef to access the DLL's namespaces.")
+	fmt.Println("Now creating .unitypackage without using Unity...")
+
+	unityPackageName := nugetPackageName + ".unitypackage"
+	err = createUnityPackageFromExport(pluginPath, nugetPackageName, unityPackageName)
+	if err != nil {
+		fmt.Printf("Error creating unitypackage: %v\n", err)
+		return
+	}
+
+	fmt.Printf("Unitypackage '%s' created successfully!\n", unityPackageName)
 }
